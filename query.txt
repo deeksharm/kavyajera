@@ -1,0 +1,139 @@
+@concat(
+'WITH ec_filt AS (',
+' SELECT ',
+'   ec.book,',
+'   ec.book_document_id,',
+'   lower(ec.valuation_type) AS valuation_type,',
+'   ec.valuation_date,',
+
+'   get_json_object(',
+'       get_json_object(cast(ec.json_struct as string), ''$.content''),',
+'       ''$.valuation.revisionId''',
+'   ) AS revision_id,',
+
+'   CASE ',
+'     WHEN get_json_object(get_json_object(cast(ec.json_struct as string), ''$.content''), ''$.valuation.revisionId'') ILIKE ''%GLOBAL_EOD%'' THEN ''global_eod'' ',
+'     WHEN get_json_object(get_json_object(cast(ec.json_struct as string), ''$.content''), ''$.valuation.revisionId'') ILIKE ''%BASELINE%'' THEN ''baseline'' ',
+'     WHEN get_json_object(get_json_object(cast(ec.json_struct as string), ''$.content''), ''$.valuation.revisionId'') ILIKE ''%PENDING_FO_REVIEW%'' THEN ''pending_fo_review'' ',
+'     ELSE ''other'' ',
+'   END AS book_close_tag,',
+
+'   ec.entry_first_created_time ',
+
+' FROM `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_etl`.`etl_cdm_valuations_event_control` ec ',
+
+' WHERE ec.dlh_status in (''timeout'', ''valuations_book_message_missing'') ',
+' AND get_json_object(',
+'       get_json_object(cast(ec.json_struct as string), ''$.content''),',
+'       ''$.valuation.revisionId''',
+'     ) IS NOT NULL ',
+
+' AND DATE(ec.entry_first_created_time)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+' AND DATE(ec.entry_first_created_time)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1)',
+
+'),',
+
+'ec_latest AS (',
+
+' SELECT *,',
+' ROW_NUMBER() OVER (',
+' PARTITION BY book, valuation_date, book_close_tag ',
+' ORDER BY ',
+' CAST(regexp_extract(revision_id,''([0-9]+)\\.([0-9]+)$'',1) AS INT) DESC NULLS LAST,',
+' CAST(regexp_extract(revision_id,''([0-9]+)\\.([0-9]+)$'',2) AS INT) DESC NULLS LAST,',
+' entry_first_created_time DESC',
+' ) rn ',
+' FROM ec_filt',
+
+'),',
+
+'ec_joined AS (',
+
+' SELECT ',
+' coalesce(cf.document_id, ex.document_id, pnl.document_id) document_id,',
+' ecl.valuation_type ',
+
+' FROM ec_latest ecl ',
+
+' LEFT JOIN `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_cashflows` cf ',
+
+' ON ecl.revision_id = cf.revision_id ',
+' AND ecl.valuation_type=lower(cf.valuation_type) ',
+' AND DATE(cf.ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+' AND DATE(cf.ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1) ',
+
+' LEFT JOIN `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_exposures` ex ',
+
+' ON ecl.revision_id = ex.revision_id ',
+' AND ecl.valuation_type=lower(ex.valuation_type) ',
+' AND DATE(ex.ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+' AND DATE(ex.ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1) ',
+
+' LEFT JOIN `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_pnl_attribution` pnl ',
+
+' ON ecl.revision_id = pnl.revision_id ',
+' AND ecl.valuation_type=lower(pnl.valuation_type) ',
+' AND DATE(pnl.ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+' AND DATE(pnl.ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1) ',
+
+' WHERE ecl.rn=1',
+
+') ',
+
+'SELECT DISTINCT concat("document_id=",document_id) document_id, valuation_type FROM (',
+
+'SELECT document_id, valuation_type ',
+'FROM `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_cashflows` ',
+'WHERE etl_status IN (''inserted'',''completeness_check_start'') ',
+'AND status=''COMPLETE'' ',
+'AND record_modification_time<current_timestamp()-INTERVAL 30 MINUTE ',
+'AND DATE(ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+'AND DATE(ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1)',
+
+' UNION ALL ',
+
+'SELECT document_id, valuation_type ',
+'FROM `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_exposures` ',
+'WHERE etl_status IN (''inserted'',''completeness_check_start'') ',
+'AND status=''COMPLETE'' ',
+'AND record_modification_time<current_timestamp()-INTERVAL 30 MINUTE ',
+'AND DATE(ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+'AND DATE(ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1)',
+
+' UNION ALL ',
+
+'SELECT document_id, valuation_type ',
+'FROM `ddh_', pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'`.`',
+pipeline().globalParameters.GlobalAzureDatabricksEnvironment,
+'_ddh_silver`.`silver_cdm_valuations_status_pnl_attribution` ',
+'WHERE etl_status IN (''inserted'',''completeness_check_start'') ',
+'AND status=''COMPLETE'' ',
+'AND record_modification_time<current_timestamp()-INTERVAL 30 MINUTE ',
+'AND DATE(ingestion_date)>=to_date(''', pipeline().parameters.p_start_date, ''') ',
+'AND DATE(ingestion_date)<date_add(to_date(''', pipeline().parameters.p_end_date, '''),1)',
+
+' UNION ALL ',
+
+'SELECT document_id, valuation_type FROM ec_joined',
+
+')'
+)
